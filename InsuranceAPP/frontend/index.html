@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Personal Insurance App</title>
+    <!-- Add Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+	
+	<script>
+  // Global click tracker - this will catch ALL clicks
+  document.addEventListener('click', function(e) {
+    console.log('🖱️🔍 GLOBAL CLICK DETECTED:', {
+      target: e.target.tagName,
+      targetId: e.target.id,
+      targetClass: e.target.className,
+      targetText: e.target.innerText?.substring(0, 30),
+      currentTarget: e.currentTarget?.tagName,
+      timestamp: new Date().toISOString(),
+      path: window.location.pathname
+    });
+  }, true); // true = capture phase, catches clicks before they're processed
+
+  // Track all navigation
+  const originalPushState = history.pushState;
+  history.pushState = function() {
+    console.log('📌🔍 pushState called:', {
+      args: arguments,
+      from: window.location.pathname,
+      to: arguments[2],
+      timestamp: new Date().toISOString()
+    });
+    return originalPushState.apply(this, arguments);
+  };
+
+  window.addEventListener('popstate', function() {
+    console.log('📌🔍 popstate event:', {
+      from: document.referrer,
+      to: location.pathname,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  // Track all link clicks
+  document.addEventListener('click', function(e) {
+    // Check if click is on a button or link
+    const target = e.target.closest('button, a, [role="button"]');
+    if (target) {
+      console.log('🔗🔍 INTERACTIVE ELEMENT CLICKED:', {
+        type: target.tagName,
+        text: target.innerText?.substring(0, 30),
+        href: target.href,
+        onclick: target.onclick ? 'yes' : 'no',
+        path: window.location.pathname
+      });
+    }
+  });
+
+  console.log('🔍🔍 Enhanced debug console initialized at:', new Date().toISOString());
+  console.log('📍 Current URL:', window.location.href);
+  console.log('📍 Current path:', window.location.pathname);
+</script>
+
+
+  </body>
+</html>

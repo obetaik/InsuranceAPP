@@ -1,0 +1,51 @@
+.app-wrapper {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  margin-left: 250px;
+  padding: 20px;
+  background-color: #f5f7fa;
+  min-height: 100vh;
+}
+
+.content-container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* Remove any potential overlays */
+.sidebar {
+  z-index: 1000;
+}
+
+/* Ensure content is visible */
+main {
+  position: relative;
+  z-index: 1;
+}
+
+/* Products page styles */
+.hover-card {
+  transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+}
+
+.hover-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Product badges */
+.badge {
+  font-size: 0.75rem;
+  padding: 0.35rem 0.65rem;
+  font-weight: 500;
+}
+
+/* Price styling */
+.fs-4 {
+  font-size: 1.5rem !important;
+  font-weight: bold;
+}
