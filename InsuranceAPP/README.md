@@ -364,14 +364,6 @@ tail -f storage/logs/laravel.log
 
 # ✅ Notes
 
-* Do **not commit `.env` or `vendor/`**
 * Use **HTTPS in production**
 * Replace all placeholders (`<VM_IP>`, credentials)
-
----
-
-If you want, I can also:
-
-* Add **architecture diagram (for GitHub)**
-* Convert this into a **professional DevOps portfolio README**
-* Or simplify it into a **1-page quick deployment guide** 👍
+ 
