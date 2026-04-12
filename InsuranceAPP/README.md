@@ -1,464 +1,649 @@
-================================================================================
-PERSONAL INSURANCE APPLICATION - INFRASTRUCTURE DEPLOYMENT
-================================================================================
-
-Project: Insurance API Platform (Two-VM Architecture with Database Isolation)
-Author: Infrastructure Team
-Date: April 2026
-Version: 2.0.0
-
-================================================================================
-ARCHITECTURE SUMMARY
-================================================================================
-
-This deployment provisions:
-
-- 2 Azure VMs (Ubuntu 22.04):
-  - Frontend VM: React application (served by Nginx) - Public IP accessible
-  - Backend VM: Laravel backend API (PHP 8.3) - No public IP, isolated
-- Azure SQL Database (Basic tier) - ONLY accessible by Backend VM
-- Azure Storage Account (Static assets)
-- Virtual Network with two isolated subnets:
-  - Frontend Subnet (10.0.1.0/24): Public access for HTTP/HTTPS
-  - Backend Subnet (10.0.2.0/24): Private, only accessible from Frontend VM
-- Network Security Groups for traffic control
-
-SECURITY HIGHLIGHTS:
-
-- Frontend VM: Public access only (ports 80, 443)
-- Backend VM: NO public IP, NO direct internet access
-- Database: Firewall allows ONLY Backend VM private IP
-- Frontend CANNOT access database directly (even if compromised)
-- SSH to backend requires passing through frontend (jump host pattern)
-
-================================================================================
-ASSUMPTIONS AND LIMITATIONS
-================================================================================
-
-Assumptions:
-
-1. Azure subscription with Contributor access
-2. Azure CLI installed and configured
-3. Auth0 account with configured application
-4. Laravel backend code in ../insurance-api-main/
-5. React frontend code in ../frontend/
-6. SSH key or password access configured
-
-Limitations:
-
-1. Single instance per VM (no high availability for production)
-2. Basic SQL tier (no failover support)
-3. Manual SSL configuration required for HTTPS
-4. React builds performed on the Frontend VM (requires Node.js)
-5. Backup strategy not implemented
-6. Backend VM requires jump host access via Frontend VM
-
-================================================================================
-KNOWN ISSUES AND RESOLUTIONS
-================================================================================
-
-Issue 1: Public IP deployment fails
-
-- Error: "IPv4BasicSkuPublicIpCountLimitReached"
-- Resolution: Use Standard SKU public IP with Static allocation
-- Fixed in: main.bicep (frontendPublicIP resource)
-
-Issue 2: SQL Server connection timeout from Backend VM
-
-- Error: "Cannot open database requested"
-- Resolution: SQL firewall rule only allows Backend VM IP
-- Command: az sql server firewall-rule create --name AllowBackendVM --start-ip-address $BACKEND_IP
-
-Issue 3: Frontend cannot connect to Backend VM
-
-- Error: "Connection refused" or timeout
-- Resolution: Ensure Backend VM NSG allows HTTP from Frontend subnet (10.0.1.0/24)
-- Check: backend-nsg security rules
-
-Issue 4: React routes return 404
-
-- Error: "Cannot GET /products"
-- Resolution: Configure Nginx with try_files $uri $uri/ /index.html
-- Fixed in: frontend-setup.sh
-
-Issue 5: API routes return 404
-
-- Error: "Cannot GET /api/products"
-- Resolution: Configure Frontend Nginx to proxy /api/\* to Backend VM
-- Fixed in: frontend-setup.sh (proxy_pass to BACKEND_IP)
-
-Issue 6: CORS multiple values error
-
-- Error: "Access-Control-Allow-Origin header contains multiple values"
-- Resolution: Remove CORS headers from Nginx, keep only Laravel config
-- Fixed in: backend-setup.sh (CORS only in Laravel)
-
-Issue 7: Cannot SSH to Backend VM directly
-
-- Error: "Connection timeout" (Backend has no public IP)
-- Resolution: Use jump host pattern - SSH through Frontend VM
-- Command: ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP
-
-Issue 8: Circular dependency in Bicep deployment
-
-- Error: "Cannot reference backend.outputs before backend module is defined"
-- Resolution: Declare Backend VM module BEFORE Frontend VM module
-- Fixed in: main.bicep (module order)
-
-================================================================================
-DEPLOYMENT INSTRUCTIONS
-================================================================================
-
-Prerequisites:
-
-1. Install Azure CLI: https://docs.microsoft.com/cli/azure/install-azure-cli
-2. Run 'az login' to authenticate
-3. Ensure Laravel and React code are ready
-4. Ensure all Bicep files are in correct directory structure
-
-Directory Structure Required:
-infrastructure/
-├── main.bicep
-└── modules/
-├── sql.bicep
-└── storage.bicep
-
-Deployment Steps:
-
-1. Create resource group:
-   az group create --name insureapi-rg --location canadacentral
-
-2. Deploy infrastructure:
-   az deployment group create \
-    --resource-group insureapi-rg \
-    --template-file infrastructure/main.bicep \
-    --parameters adminUsername=azureuser \
-    --parameters adminPassword='PASSWORD' \
-    --parameters sqlAdminPassword='PSSWORD'
-
-3. Get VM IPs and connectivity info:
-   $FRONTEND_IP = az deployment group show -g insureapi-rg -n main --query properties.outputs.frontendPublicIP.value -o tsv
-   $BACKEND_IP = az deployment group show -g insureapi-rg -n main --query properties.outputs.backendPrivateIp.value -o tsv
-   Write-Host "Frontend IP: $FRONTEND_IP (Public - Accessible from internet)"
-   Write-Host "Backend IP: $BACKEND_IP (Private - No direct access)"
-
-4. Run Frontend VM setup script (Nginx + Node.js):
-   scp infrastructure/scripts/frontend-setup.sh azureuser@$FRONTEND_IP:/home/azureuser/
-   ssh azureuser@$FRONTEND_IP "chmod +x frontend-setup.sh && sudo ./frontend-setup.sh $BACKEND_IP"
-
-5. Run Backend VM setup script (PHP + Laravel + SQL Drivers):
-   scp infrastructure/scripts/backend-setup.sh azureuser@$FRONTEND_IP:/home/azureuser/
-   ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "chmod +x backend-setup.sh && sudo ./backend-setup.sh"
-
-6. Deploy Laravel backend (from local machine):
-   scp -r ../insurance-api-main/\* azureuser@$FRONTEND_IP:/var/www/backend/
-   ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP
-   cd /var/www/backend
-   composer install --no-dev --optimize-autoloader
-   cp .env.example .env
-   php artisan key:generate
-
-   # Update .env with database connection:
-
-   # DB_HOST=insureapi-sqlserver.database.windows.net
-
-   # DB_DATABASE=insurance-api
-
-   # DB_USERNAME=sqladmin@MYAPP-sqlserver
-
-   # DB_PASSWORD=<MYPASSWORD>
-
-   php artisan migrate --force
-   sudo chown -R www-data:www-data storage bootstrap/cache
-   sudo systemctl restart php8.3-fpm
-   exit
-
-7. Deploy React frontend (from local machine):
-   scp -r ../frontend/\* azureuser@$FRONTEND_IP:/var/www/frontend/
-   ssh azureuser@$FRONTEND_IP
-   cd /var/www/frontend
-   npm install
-   npm run build
-   sudo chown -R www-data:www-data build
-   sudo systemctl restart nginx
-   exit
-
-8. Access the application:
-   Frontend (React): http://$FRONTEND_IP/
-   Backend API (Laravel): http://$FRONTEND_IP/api/products
-
-9. Verify database isolation (Security Test):
-
-   # Test from Frontend (should FAIL):
-
-   ssh azureuser@$FRONTEND_IP "nc -zv insureapi-sqlserver.database.windows.net 1433"
-
-   # Test from Backend (should SUCCEED):
-
-   ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "nc -zv insureapi-sqlserver.database.windows.net 1433"
-
-================================================================================
-CONNECTIVITY MATRIX
-================================================================================
-
-| From / To       | Frontend VM   | Backend VM | SQL Database | Internet |
-| --------------- | ------------- | ---------- | ------------ | -------- |
-| Internet (User) | ✅ HTTP/HTTPS | ❌         | ❌           | N/A      |
-| Frontend VM     | N/A           | ✅ HTTP    | ❌ (Blocked) | ✅       |
-| Backend VM      | ❌            | N/A        | ✅ (Allowed) | ❌       |
-| SSH to Frontend | ✅ Direct     | N/A        | N/A          | N/A      |
-| SSH to Backend  | ✅ Via Jump   | ✅ Direct  | N/A          | ❌       |
-
-================================================================================
-SCALING INSTRUCTIONS
-================================================================================
-
-To scale up Frontend VM:
-az vm resize -g insureapi-rg -n insureapi-frontend-vm --size Standard_D2s_v3
-
-To scale up Backend VM:
-az vm resize -g insureapi-rg -n insureapi-backend-vm --size Standard_D2s_v3
-
-To scale database:
-az sql db update -g insureapi-rg -s insureapi-sqlserver -n insurance-api --edition Standard --capacity S1
-
-To add auto-scaling for production:
-
-# Create VM Scale Set for Backend
-
-az vmss create -g insureapi-rg -n backend-vmss --image Ubuntu2204 --vm-sku Standard_B2s --instance-count 2
-
-# Create Load Balancer
-
-az network lb create -g insureapi-rg -n backend-lb --sku Standard --vnet-name insureapi-vnet --subnet backend-subnet
-
-# Configure auto-scale rules
-
-az monitor autoscale create -g insureapi-rg -n backend-autoscale --resource backend-vmss --min-count 2 --max-count 10 --count 2
-az monitor autoscale rule create --autoscale-name backend-autoscale -g insureapi-rg --condition "Percentage CPU > 70 avg 5m" --scale out 1
-az monitor autoscale rule create --autoscale-name backend-autoscale -g insureapi-rg --condition "Percentage CPU < 30 avg 5m" --scale in 1
-
-================================================================================
-TROUBLESHOOTING COMMANDS
-================================================================================
-
-Check VM status:
-az vm get-instance-view -g insureapi-rg -n insureapi-frontend-vm --query "statuses[1].code"
-az vm get-instance-view -g insureapi-rg -n insureapi-backend-vm --query "statuses[1].code"
-
-View logs on Frontend VM:
-ssh azureuser@$FRONTEND_IP "sudo tail -f /var/log/nginx/error.log"
-
-View logs on Backend VM:
-ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sudo tail -f /var/log/nginx/error.log"
-ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sudo tail -f /var/www/backend/storage/logs/laravel.log"
-
-Test connectivity:
-
-# Test Frontend Nginx
-
-curl -I http://$FRONTEND_IP/
-
-# Test API through Frontend proxy
-
-curl http://$FRONTEND_IP/api/products
-
-# Test direct Backend API (should fail - no public IP)
-
-curl http://$BACKEND_IP/api/products
-
-# Test database connectivity from Backend
-
-ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sqlcmd -S insureapi-sqlserver.database.windows.net -U sqladmin -P 'password' -d insurance-api -Q 'SELECT 1'"
-
-Restart services on Frontend VM:
-ssh azureuser@$FRONTEND_IP "sudo systemctl restart nginx"
-
-Restart services on Backend VM:
-ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sudo systemctl restart php8.3-fpm && sudo systemctl restart nginx"
-
----
-
-```
-
-Configure Laravel to Accept Auth0 Tokens instead of SANCTUM
-This allows you to use Auth0 for authentication while Laravel validates Auth0 JWTs.
-  Install Auth0 and JWT packages
-composer require auth0/login
-composer require firebase/php-jwt
-
-Run migration:
-php artisan migrate
-
-php artisan db:seed --class=InsuranceProductSeeder
-
-Verification
-After installation, verify everything is working:
-Check Auth0 package is installed
-composer show | findstr auth0
-
-Check JWT package is installed
-composer show | findstr jwt
-
-Check routes
-php artisan route:list
-
-
-
-
-
-
-
-Laravel backend running on http://localhost:8000
-React frontend running on http://localhost:5173
-
-
-Make sure your Laravel config/cors.php has:
-'paths' => ['api/*'],
-'allowed_origins' => ['http://localhost:5173'],
-'allowed_methods' => ['*'],
-'allowed_headers' => ['*'],
-'supports_credentials' => true,
-
-
-
-
-
-# Clear all caches
+🚀 Complete Deployment Guide: Insurance API Platform with JWT Authentication
+📋 Project Overview
+Deploy a full-stack Insurance API platform with Laravel backend (JWT authentication via Auth0) on Azure VM and React frontend, using Azure SQL Database for data persistence.
+________________________________________
+📁 Project Structure
+text
+InsuranceAPP/
+├── insurance-api-main/ (Laravel Backend)
+│   ├── app/
+│   ├── bootstrap/
+│   ├── config/
+│   ├── database/
+│   ├── public/
+│   ├── routes/
+│   ├── storage/
+│   └── vendor/
+├── frontend/ (React Frontend)
+│   ├── src/
+│   ├── public/
+│   └── package.json
+└── infrastructure/
+    ├── main.bicep
+    └── modules/
+        ├── sql.bicep
+        └── storage.bicep
+________________________________________
+Phase 1: Azure Infrastructure Setup
+1.1 Prerequisites
+powershell
+# Install Azure CLI
+# Download from: https://aka.ms/installazurecliwindows
+
+# Login to Azure
+az login
+
+# Verify subscription
+az account show
+1.2 Create Infrastructure Files
+File: infrastructure/main.bicep
+File: infrastructure/modules/sql.bicep
+File: infrastructure/modules/storage.bicep
+ 
+1.3 Deploy Infrastructure
+powershell
+# Create resource group
+az group create --name insureapi-rg --location canadacentral
+
+# Navigate to infrastructure folder
+cd infrastructure
+
+# Deploy Bicep template
+az deployment group create --resource-group insureapi-rg --template-file main.bicep --parameters adminUsername=azureuser --parameters adminPassword='P!ssw0rd!123' --parameters sqlAdminPassword='P!ssw0rd!123'
+
+# Verify deployment
+az deployment group show --resource-group insureapi-rg --name main
+
+# Get VM IP address
+$VM_IP=$(az vm show -d -g insureapi-rg -n insureapi-vm --query publicIps -o tsv)
+echo "VM IP: $VM_IP"
+
+# Get SQL Server FQDN
+$SQL_FQDN=$(az deployment group show --resource-group insureapi-rg --name main --query properties.outputs.sqlServerFqdn.value -o tsv)
+echo "SQL Server: $SQL_FQDN"
+
+insureapi-sqlserver.database.windows.net
+
+$myIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing).Content
+Write-Host "Your IP address: $myIp"
+
+# Add firewall rule for your IP
+az sql server firewall-rule create --resource-group insureapi-rg --server insureapi-sqlserver --name "AllowLocalDev" --start-ip-address $myIp --end-ip-address $myIp
+1.4 Add VM IP to SQL Server Firewall
+powershell
+# Add firewall rule for VM
+az sql server firewall-rule create --resource-group insureapi-rg --server insureapi-sqlserver --name AllowVM --start-ip-address $VM_IP --end-ip-address $VM_IP
+________________________________________
+Phase 2: VM Setup for Laravel Backend
+2.1 Create VM Setup Script
+File: vm-setup.sh
+ 
+
+2.2 Run VM Setup
+powershell
+# Copy setup script to VM USE THE REAL IP instead ${VM_IP}
+scp vm-setup.sh azureuser@${VM_IP}:/home/azureuser/
+
+SSH first, 
+powershell
+# First, SSH into the VM
+ssh azureuser@${VM_IP}
+
+# Remove Windows line endings if present
+dos2unix vm-setup.sh 2>/dev/null || sed -i 's/\r$//' vm-setup.sh
+
+# Once inside the VM, run these commands:
+cd /home/azureuser
+chmod +x vm-setup.sh
+sudo ./vm-setup.sh
+
+WHEN UBUNTU DIALOGUE COMES UP, PRESS ENTER THEN CANCEL EACH TIME TO PROCEED
+
+Cd /var/www/html/insurance-api
+chmod +x /var/www/html/insurance-api/* IF ERROR, RUN sudo chmod +x -R /var/www/html/insurance-api/
+sudo chown -R $USER:$USER /var/www/html/insurance-api
+
+ls -lart /var/www/html/insurance-api
+total 8
+drwxr-xr-x 3 root      root      4096 Apr  4 19:03 ..
+drwxr-xr-x 2 azureuser azureuser 4096 Apr  4 19:03 .
+
+Ensure owner of the directory above in RED is azureuser to be able to copy files into it
+
+COPY BELOW IN YELLOW AND RUN SHELL OF VM 
+
+#!/bin/bash
+echo "Installing SQL Server drivers for PHP 8.3..."
+
+# Install prerequisites
+sudo apt update
+sudo apt install -y curl gnupg unixodbc-dev php-pear php8.3-dev
+
+# Install Microsoft ODBC Driver
+curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+sudo apt update
+sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+
+# Install PHP extensions
+sudo pecl install sqlsrv
+sudo pecl install pdo_sqlsrv
+
+# Enable extensions
+echo "extension=sqlsrv.so" | sudo tee /etc/php/8.3/mods-available/sqlsrv.ini
+echo "extension=pdo_sqlsrv.so" | sudo tee /etc/php/8.3/mods-available/pdo_sqlsrv.ini
+sudo phpenmod sqlsrv pdo_sqlsrv
+
+# Restart PHP
+sudo systemctl restart php8.3-fpm
+
+# Verify
+echo "========================================="
+echo "Verifying installation..."
+echo "========================================="
+php -m | grep sqlsrv
+php -m | grep pdo_sqlsrv
+
+echo "========================================="
+echo "Installation complete!"
+echo "========================================="
+
+
+FOR POPUP, CLICK OK, TAB AND SELECT CANCEL
+Then exit SSH
+________________________________________
+Phase 3: Deploy Laravel Backend with JWT
+3.1 Copy Laravel Application to VM
+powershell
+# From local machine, copy Laravel files
+DON’T COPY vendor folder
+Cd ../
+scp -r insurance-api-main/* azureuser@{$VM_IP}:/var/www/html/insurance-api/
+scp -r insurance-api-main/* azureuser@20.151.223.180:/var/www/html/insurance-api/ //Change the IP to VM public IP
+OR USE WINSCP TO TRANFER THE FOLDER
+3.2 SSH into VM and Configure Laravel
+bash
+ssh azureuser@$VM_IP
+cd /var/www/html/insurance-api
+3.3 Install Laravel Dependencies
+cd /var/www/html/insurance-api
+
+bash
+# Install Composer dependencies
+composer install --no-dev --optimize-autoloader
+
+# Install JWT and Auth0 packages
+composer require auth0/login:^7.0
+composer require firebase/php-jwt:^6.0
+composer require laravel/sanctum
+3.4 Create and Configure .env File
+bash
+# Create .env file
+cp .env.example .env
+
+# Generate app key
+php artisan key:generate
+
+# Edit .env file
+nano .env
+Complete .env configuration:
+env
+APP_NAME=insureapi-backend
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=http://$VM_IP
+
+# Database Configuration
+DB_CONNECTION=sqlsrv
+DB_HOST=insureapi-sqlserver.database.windows.net
+DB_PORT=1433
+DB_DATABASE=insurance-api
+DB_USERNAME=sqladmin@insureapi-sqlserver
+DB_PASSWORD=PSSSWWWSSSDDD
+
+# Auth0 JWT Configuration
+AUTH0_DOMAIN=dev-DDD.SS.auth0.com
+AUTH0_CLIENT_ID=JPvi4Cz8rk
+AUTH0_CLIENT_SECRET=-zRno_vV 
+AUTH0_AUDIENCE=https://de.DDD.auth0.com/api/v2/
+AUTH0_CONNECTION=Username-Password-Authentication
+STEP 3.5 THROUGH 3.9 CAN BE SKIPPED AS CODE IS UPDATED
+3.5 Configure Auth0 in Laravel
+bash
+# Publish Auth0 configuration
+php artisan vendor:publish --tag=auth0-config
+
+# Configure auth guard
+nano config/auth.php
+Update the guards array:
+php
+'guards' => [
+    'web' => [
+        'driver' => 'session',
+        'provider' => 'users',
+    ],
+    'api' => [
+        'driver' => 'auth0',
+        'provider' => 'users',
+    ],
+],
+3.6 Create JWT Middleware
+bash
+# Create middleware
+php artisan make:middleware Auth0JWT
+Edit app/Http/Middleware/Auth0JWT.php:
+bash
+nano app/Http/Middleware/Auth0JWT.php
+php
+<?php
+
+namespace App\Http\Middleware;
+
+use Closure;
+use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
+use Illuminate\Http\Request;
+
+class Auth0JWT
+{
+    public function handle(Request $request, Closure $next)
+    {
+        $token = $request->bearerToken();
+        
+        if (!$token) {
+            return response()->json(['error' => 'No token provided'], 401);
+        }
+        
+        try {
+            $decoded = JWT::decode($token, new Key(config('auth0.domain') . '/.well-known/jwks.json', 'RS256'));
+            $request->merge(['user' => (array)$decoded]);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Invalid token: ' . $e->getMessage()], 401);
+        }
+        
+        return $next($request);
+    }
+}
+3.7 Register Middleware
+bash
+nano app/Http/Kernel.php
+Add to $routeMiddleware:
+php
+protected $routeMiddleware = [
+    // Other middleware...
+    'auth0.jwt' => \App\Http\Middleware\Auth0JWT::class,
+];
+3.8 Update API Routes
+bash
+nano routes/api.php
+php
+<?php
+
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\ProductController;
+use App\Http\Controllers\Api\QuoteController;
+use App\Http\Controllers\Api\PolicyController;
+use App\Http\Controllers\Api\ClaimController;
+
+// Public routes (no authentication required)
+Route::get('/products', [ProductController::class, 'index']);
+Route::get('/insurance-products', [ProductController::class, 'index']);
+
+// Protected routes (require JWT authentication)
+Route::middleware(['auth0.jwt'])->group(function () {
+    // Quote routes
+    Route::get('/quotes', [QuoteController::class, 'index']);
+    Route::post('/quotes', [QuoteController::class, 'store']);
+    Route::get('/quotes/{id}', [QuoteController::class, 'show']);
+    
+    // Policy routes
+    Route::get('/policies', [PolicyController::class, 'index']);
+    Route::post('/policies', [PolicyController::class, 'store']);
+    Route::get('/policies/{id}', [PolicyController::class, 'show']);
+    
+    // Claim routes
+    Route::get('/claims', [ClaimController::class, 'index']);
+    Route::post('/claims', [ClaimController::class, 'store']);
+    Route::get('/claims/{id}', [ClaimController::class, 'show']);
+});
+3.9 Fix PolicyController Authorization
+bash
+nano app/Http/Controllers/Api/PolicyController.php
+In the store method, fix the authorization check:
+php
+// Use loose comparison or type casting
+if ((int) $quote->user_id !== (int) $user->id) {
+    return response()->json([
+        'success' => false,
+        'message' => 'Unauthorized: This quote does not belong to you'
+    ], 403);
+}
+3.10 Run Database Migrations
+bash
+# Fix permissions
+sudo chown -R www-data:www-data storage bootstrap/cache
+sudo chmod -R 777 storage bootstrap/cache
+
+sudo touch /var/www/html/insurance-api/storage/logs/laravel.log
+sudo chown www-data:www-data /var/www/html/insurance-api/storage/logs/laravel.log
+sudo chmod 777 /var/www/html/insurance-api/storage/logs/laravel.log
+
+# Create cache table
+php artisan cache:table
+
+# Run migrations
+php artisan migrate –force
+
+php artisan db:seed --class=InsuranceProductsSeeder
+
+# Clear and rebuild caches
 php artisan config:clear
-php artisan cache:clear
-php artisan view:clear
 php artisan route:clear
+php artisan view:clear
+php artisan cache:clear
 
-# Regenerate autoload
+# Optimize autoloader
 composer dump-autoload
 
+SKIP THE STEP IN RED IF THE ONE IN GREEN HAS BEEN EXECUTED SUCCESSFULLY AND TABLES CREATED:
+# Run migrations:
+php artisan migrate –force
+php artisan db:seed --class=InsuranceProductSeeder
 
+LOGIN TO AZURE PORTAL, GO TO SQL SERVER QUERY EDITOR, CONNECT WITH SQLADMIN USER AND PASSWORD AND COPY THE CONTENT OF table_structures.sql AND sample-data.sql AND RUN THE QUERIES
 
-Start Both Servers
-Terminal 1 (Laravel Backend):
-cd PATH/insurance-api
+3.11 Set Final Permissions and Restart Services
+bash
+# Set permissions
+sudo chown -R www-data:www-data storage bootstrap/cache vendor
+sudo chmod -R 777 storage bootstrap/cache
+
+# Restart services
+sudo systemctl restart php8.3-fpm
+
+sudo systemctl restart nginx
+php artisan serve --host=127.0.0.1 --port=8000 &
 php artisan serve
 
-Terminal 2 (React Frontend):
-cd PATH/frontend
+DEPLOY FRONTEND
+
+cd /var/www/html
+sudo mkdir frontend
+
+sudo chmod +x -R /var/www/html/frontend/
+sudo chown -R $USER:$USER /var/www/html/frontend
+
+ls -lart /var/www/html/frontend
+
+cd /var/www/html/frontend
+
+# Update package list
+sudo apt update
+
+# Install Node.js 20.x from NodeSource repository
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+
+# Install Node.js (includes npm)
+sudo apt install -y nodejs
+
+# Verify installation
+node --version
+# Should show: v20.x.x
+npm --version
+modify /var/www/html/insurance-api/app/Http/Middleware/Cors.php and add the PUBLIC IP e.g
+
+->header('Access-Control-Allow-Origin', 'http://http://20.220.200.43:5173')
+->header('Access-Control-Allow-Origin', 'http://http://20.220.200.43')
+
+$response->headers->set('Access-Control-Allow-Origin', 'http://http://20.220.200.43:5173');
+$response->headers->set('Access-Control-Allow-Origin', 'http://http://20.220.200.43');
+
+# Set permissions
+echo "Setting permissions..."
+sudo chown -R www-data:www-data build
+sudo chmod -R 755 build
+
+# Restart Nginx
+echo "Restarting Nginx..."
+sudo systemctl restart nginx
+
+ 
+Use Nginx with HTTPS (Production)
+For production, set up Nginx with SSL:
+bash
+# Install certbot for Let's Encrypt (if you have a domain)
+sudo apt install -y certbot python3-certbot-nginx
+
+
+
+update frontend .env VITE_API_BASE_URL=https://20.220.200.43/api
+
+===========================
+START SERVICE
+npm install
+
+npm run build
+
+npm run dev -- --host 0.0.0.0
+
 npm run dev
 
+________________________________________
+After Fixing 500 Errors, Fix CORS
+Update Nginx Configuration
+bash
+sudo vi /etc/nginx/sites-available/laravel
+Replace with this complete configuration:
+nginx
+server {
+    listen 80;
+    server_name _;
 
----------------------TEABLE SQL ----------------------------
+    root /var/www/html/insurance-api/public;
+    index index.php;
+
+    # CORS (update these to your actual frontend URL)
+    add_header 'Access-Control-Allow-Origin' '*' always;   # Temporarily use * for testing
+    add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, PATCH, OPTIONS' always;
+    add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, X-Requested-With, Accept, Origin' always;
+    add_header 'Access-Control-Allow-Credentials' 'true' always;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+}
 
 
+GOTO /etc/nginx/sites-available/default
+sudo vi /etc/nginx/sites-available/default
 
-
-users	CREATE TABLE `users` (
-  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  `name` varchar(255) NOT NULL,
-  `email` varchar(255) NOT NULL,
-  `phone` varchar(255) DEFAULT NULL,
-  `address` text DEFAULT NULL,
-  `city` varchar(255) DEFAULT NULL,
-  `state` varchar(255) DEFAULT NULL,
-  `zip_code` varchar(255) DEFAULT NULL,
-  `auth0_id` varchar(255) DEFAULT NULL,
-  `avatar` varchar(255) DEFAULT NULL,
-  `status` enum('active','inactive','suspended') NOT NULL DEFAULT 'active',
-  `email_verified_at` timestamp NULL DEFAULT NULL,
-  `password` varchar(255) NOT NULL,
-  `remember_token` varchar(100) DEFAULT NULL,
-  `created_at` timestamp NULL DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT NULL,
-  `deleted_at` timestamp NULL DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `users_email_unique` (`email`),
-  UNIQUE KEY `users_auth0_id_unique` (`auth0_id`)
-)
-
-
-
-CREATE TABLE `claims` (
-  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  `user_id` bigint(20) unsigned NOT NULL,
-  `policy_id` bigint(20) unsigned NOT NULL,
-  `claim_number` varchar(255) NOT NULL,
-  `incident_date` date NOT NULL,
-  `description` text NOT NULL,
-  `claim_amount` decimal(10,2) NOT NULL,
-  `approved_amount` decimal(10,2) DEFAULT NULL,
-  `status` enum('Submitted','Under Review','Approved','Rejected','Paid') NOT NULL DEFAULT 'Submitted',
-  `documents` text DEFAULT NULL,
-  `resolution_date` date DEFAULT NULL,
-  `created_at` timestamp NULL DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `claims_claim_number_unique` (`claim_number`),
-  KEY `claims_user_id_foreign` (`user_id`),
-  KEY `claims_policy_id_foreign` (`policy_id`),
-  CONSTRAINT `claims_policy_id_foreign` FOREIGN KEY (`policy_id`) REFERENCES `policies` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `claims_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-)
+add below:
 
 
 
-CREATE TABLE `insurance_products` (
-  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  `name` varchar(255) NOT NULL,
-  `category` text NOT NULL,
-  `description` text NOT NULL,
-  `base_price` decimal(10,2) NOT NULL,
-  `created_at` timestamp NULL DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT NULL,
-  PRIMARY KEY (`id`)
-)
+# HTTP redirect to HTTPS
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name 20.220.200.43;
+
+    ssl_certificate /etc/nginx/ssl/selfsigned.crt;
+    ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+
+    root /var/www/html/frontend/dist;
+    index index.html;
+
+    # Frontend SPA routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Proxy API calls to Laravel (without stripping /api)
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+Test and reload:
+bash
+sudo nginx -t
+sudo systemctl reload nginx
+
+ Check Azure NSG for Port 5173
+az network nsg rule list --resource-group insureapi-rg --nsg-name insureapi-nsg --output table
+
+If port 5173 is not listed, add it:
+az network nsg rule create --resource-group insureapi-rg --nsg-name insureapi-nsg --name AllowVite5173 --priority 103 --direction Inbound  --access Allow --protocol Tcp --destination-port-ranges 5173 --source-address-prefixes '*'
+🔧 Fix: Install Laravel View Package
+Step 1: Install illuminate/view package
+bash
+cd /var/www/html/insurance-api
+composer require illuminate/view
+Step 2: Clear all caches
+bash
+php artisan config:clear
+php artisan route:clear
+php artisan view:clear
+php artisan cache:clear
+Step 3: Rebuild autoloader
+bash
+composer dump-autoload
+Step 4: Reinstall Laravel framework components
+bash
+composer require laravel/framework
+Step 5: Fix Laravel configuration
+bash
+# Republish Laravel configuration
+php artisan config:cache
+php artisan view:cache
 
 
+# Check migration status
+php artisan migrate:status
+  Migration name ...................................................................................... Batch / Status
+  0001_01_01_000000_create_users_table ....................................................................... [1] Ran
+  0001_01_01_000001_create_cache_table ....................................................................... [1] Ran
+  0001_01_01_000002_create_jobs_table ........................................................................ [1] Ran
+  0001_01_01_000003_create_insurance_products_table .......................................................... [1] Ran
+  0001_01_01_000004_create_quotes_table ...................................................................... [1] Ran
+  0001_01_01_000005_create_policies_table .................................................................... [1] Ran
+  0001_01_01_000006_create_claims_table ...................................................................... [1] Ran
+  2026_03_15_140930_create_personal_access_tokens_table ...................................................... [1] Ran
+  2026_04_11_223653_create_sessions_table .................................................................... [1] Ran
 
-CREATE TABLE `policies` (
-  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  `user_id` bigint(20) unsigned NOT NULL,
-  `quote_id` bigint(20) unsigned NOT NULL,
-  `insurance_product_id` bigint(20) unsigned NOT NULL,
-  `policy_number` varchar(255) NOT NULL,
-  `premium_amount` decimal(10,2) NOT NULL,
-  `start_date` date NOT NULL,
-  `end_date` date NOT NULL,
-  `status` enum('Active','Expired','Cancelled') NOT NULL DEFAULT 'Active',
-  `effective_date` date NOT NULL,
-  `created_at` timestamp NULL DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `policies_policy_number_unique` (`policy_number`),
-  KEY `policies_user_id_foreign` (`user_id`),
-  KEY `policies_quote_id_foreign` (`quote_id`),
-  KEY `policies_insurance_product_id_foreign` (`insurance_product_id`),
-  CONSTRAINT `policies_insurance_product_id_foreign` FOREIGN KEY (`insurance_product_id`) REFERENCES `insurance_products` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `policies_quote_id_foreign` FOREIGN KEY (`quote_id`) REFERENCES `quotes` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `policies_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-)
+IF status is PENDING
+php artisan migrate:refresh –force
+php artisan migrate –force 
 
+________________________________________
+Phase 5: React Frontend Configuration
+5.1 Update Environment Variables
+File: frontend/.env
+env
+VITE_API_BASE_URL=http://$VM_IP/api
+VITE_AUTH0_DOMAIN=dev .us.auth0.com
+VITE_AUTH0_CLIENT_ID=JPydg3oDfx 
+VITE_AUTH0_AUDIENCE=https://de 
+5.2 Update API Service to Send JWT Token
+File: frontend/src/api.js
+javascript
+import axios from 'axios';
 
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://$VM_IP/api';
 
-CREATE TABLE `quotes` (
-  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  `quote_number` varchar(255) DEFAULT NULL,
-  `user_id` bigint(20) unsigned NOT NULL,
-  `insurance_product_id` bigint(20) unsigned NOT NULL,
-  `coverage_amount` decimal(10,2) DEFAULT NULL,
-  `deductible` decimal(10,2) DEFAULT NULL,
-  `additional_options` text DEFAULT NULL,
-  `estimated_premium` decimal(10,2) NOT NULL,
-  `calculated_price` decimal(10,2) DEFAULT NULL,
-  `status` varchar(255) NOT NULL DEFAULT 'pending',
-  `expires_at` timestamp NULL DEFAULT NULL,
-  `created_at` timestamp NULL DEFAULT NULL,
-  `updated_at` timestamp NULL DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `quotes_quote_number_unique` (`quote_number`),
-  KEY `quotes_user_id_foreign` (`user_id`),
-  KEY `quotes_insurance_product_id_foreign` (`insurance_product_id`),
-  CONSTRAINT `quotes_insurance_product_id_foreign` FOREIGN KEY (`insurance_product_id`) REFERENCES `insurance_products` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `quotes_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-)
+const api = axios.create({
+  baseURL: API_URL,
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  },
+  timeout: 30000,
+});
 
+// Request interceptor to add JWT token
+api.interceptors.request.use(
+  async (config) => {
+    const token = localStorage.getItem('access_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
+// Response interceptor for error handling
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('access_token');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
 
-```
+export default api;
+5.3 Install Dependencies and Run Frontend
+powershell
+cd frontend
+npm install
+npm run dev
+________________________________________
+Phase 6: Testing the Complete System
+6.1 Test Backend API
+powershell
+# Test public endpoint
+curl http://$VM_IP/api/products
+
+# Test protected endpoint (should return 401)
+curl http://$VM_IP/api/quotes
+6.2 Test with JWT Token
+bash
+# Get token from browser localStorage after login
+# Then test protected endpoint
+curl -X GET http://$VM_IP/api/quotes \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+6.3 Test Full User Flow in Browser
+1.	Open http://localhost:5173
+2.	Login with Auth0 credentials
+3.	Browse available products
+4.	Select a product and create a quote
+5.	Review the quote and accept it to create a policy
+6.	View your policies
+7.	Submit a claim against a policy
+8.	Track claim status
+________________________________________
+📋 Quick Commands Reference
+Deploy Infrastructure
+powershell
+az group create --name insureapi-rg --location canadacentral
+az deployment group create --resource-group insureapi-rg --template-file main.bicep --parameters adminUsername=azureuser --parameters adminPassword='P!ssw0rd!123' --parameters sqlAdminPassword='P!ssw0rd!123'
+Get VM IP
+powershell
+$VM_IP=$(az vm show -d -g insureapi-rg -n insureapi-vm --query publicIps -o tsv)
+echo $VM_IP
+Connect to VM
+bash
+ssh azureuser@$VM_IP
+Deploy Backend Updates
+bash
+ssh azureuser@$VM_IP "cd /var/www/html/insurance-api && git pull && composer install && php artisan migrate --force && sudo systemctl restart php8.3-fpm"
+View Logs
+bash
+ssh azureuser@$VM_IP "tail -100 /var/www/html/insurance-api/storage/logs/laravel.log"
+Restart Services
+bash
+ssh azureuser@$VM_IP "sudo systemctl restart nginx && sudo systemctl restart php8.3-fpm"
+ 
