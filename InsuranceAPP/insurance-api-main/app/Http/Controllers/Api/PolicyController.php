@@ -65,7 +65,8 @@ class PolicyController extends Controller
             $quote = Quote::with('product')->findOrFail($validated['quote_id']);
             
             // Check if quote belongs to the authenticated user
-            if ($quote->user_id !== $user->id) {
+            //if ($quote->user_id !== $user->id) {
+            if ((int) $quote->user_id !== (int) $user->id) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Unauthorized: This quote does not belong to you'

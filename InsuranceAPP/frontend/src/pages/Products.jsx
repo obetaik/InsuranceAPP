@@ -12,7 +12,7 @@ function Products() {
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
   const [error, setError] = useState(null);
-  
+
   const { isAuthenticated, loginWithRedirect } = useAuth0();
   const location = useLocation();
   const navigate = useNavigate();
@@ -20,9 +20,7 @@ function Products() {
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const cat = params.get('category');
-    if (cat) {
-      setSelectedCategory(cat);
-    }
+    if (cat) setSelectedCategory(cat);
     fetchProducts();
   }, [location]);
 
@@ -30,107 +28,76 @@ function Products() {
     try {
       setLoading(true);
       setError(null);
-      
-      console.log('📊 Fetching products...');
+
       const response = await api.get('/products');
       console.log('✅ Products response:', response.data);
-      
-      // CRITICAL FIX: Properly extract the products array
+
       let productsData = [];
-      
-      if (response.data && response.data.success && Array.isArray(response.data.data)) {
+
+      if (response.data?.success && Array.isArray(response.data.data)) {
         productsData = response.data.data;
-        console.log('✅ Extracted from response.data.data');
       } else if (Array.isArray(response.data)) {
         productsData = response.data;
-        console.log('✅ Extracted from response.data directly');
-      } else if (response.data && Array.isArray(response.data)) {
-        productsData = response.data;
-        console.log('✅ Extracted from response.data');
-      } else {
-        console.error('❌ Unexpected response structure:', response.data);
-        productsData = [];
       }
-      
-      console.log('📦 Processed products count:', productsData.length);
-      console.log('📦 First product:', productsData[0]);
-      
+
       setProducts(productsData);
       setFilteredProducts(productsData);
-      
-      // Extract unique categories from product names
+
+      // Extract unique categories from the 'category' field
       if (productsData.length > 0) {
         const uniqueCategories = ['All', ...new Set(
-          productsData.map(p => {
-            const nameParts = p.name.split(' ');
-            return nameParts[0];
-          })
-        )];
+          productsData.map(p => p.category || 'Other')
+        )].sort();
         setCategories(uniqueCategories);
-        console.log('🏷️ Categories:', uniqueCategories);
       } else {
         setCategories(['All']);
       }
-      
+
     } catch (error) {
       console.error('❌ Error fetching products:', error);
-      setError(error.response?.data?.message || 'Failed to load products. Please try again later.');
+      setError('Failed to load products. Please try again later.');
     } finally {
       setLoading(false);
     }
   };
 
+  // Filter products
   useEffect(() => {
-    // Filter products based on category and search term
     let filtered = products;
-    
+
     if (selectedCategory !== 'All') {
       filtered = filtered.filter(p => 
-        p.name.toLowerCase().includes(selectedCategory.toLowerCase())
+        (p.category || '').toLowerCase() === selectedCategory.toLowerCase()
       );
     }
-    
+
     if (searchTerm) {
-      filtered = filtered.filter(p => 
+      filtered = filtered.filter(p =>
         p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
         (p.description && p.description.toLowerCase().includes(searchTerm.toLowerCase()))
       );
     }
-    
+
     setFilteredProducts(filtered);
   }, [selectedCategory, searchTerm, products]);
 
-  // Extract category from product name for display
-  const getProductCategory = (productName) => {
-    if (!productName) return 'Unknown';
-    return productName.split(' ')[0];
-  };
-
-  // Extract tier from product name (Basic/Premium/Term)
-  const getProductTier = (productName) => {
-    if (!productName) return '';
-    const parts = productName.split(' ');
-    return parts[parts.length - 1];
-  };
-
-  // Get badge color based on category
-  const getCategoryColor = (category) => {
-    const colors = {
-      'Auto': 'primary',
-      'Home': 'success',
-      'Life': 'info',
-      'Health': 'warning'
-    };
-    return colors[category] || 'secondary';
-  };
-
   const handleGetQuote = (productId) => {
-    console.log('🚀 Getting quote for product:', productId);
     if (!isAuthenticated && import.meta.env.VITE_SKIP_AUTH !== 'true') {
       loginWithRedirect();
     } else {
       navigate(`/quotes/new?productId=${productId}`);
     }
+  };
+
+  const getCategoryColor = (category) => {
+    const colors = {
+      'Auto': 'primary',
+      'Home': 'success',
+      'Life': 'info',
+      'Health': 'warning',
+      'Other': 'secondary'
+    };
+    return colors[category] || 'secondary';
   };
 
   if (loading) {
@@ -148,10 +115,7 @@ function Products() {
         <div className="alert alert-danger" role="alert">
           <h4 className="alert-heading">Error Loading Products</h4>
           <p>{error}</p>
-          <hr />
-          <Button variant="primary" onClick={fetchProducts}>
-            Try Again
-          </Button>
+          <Button variant="primary" onClick={fetchProducts}>Try Again</Button>
         </div>
       </Container>
     );
@@ -161,7 +125,7 @@ function Products() {
     <Container>
       <h2 className="mb-4">Insurance Products</h2>
       <p className="text-muted mb-4">Choose from our range of insurance products to protect what matters most</p>
-      
+
       {/* Filters */}
       <Row className="mb-4">
         <Col md={4}>
@@ -196,17 +160,12 @@ function Products() {
           <Col className="text-center">
             <div className="py-5">
               <p className="text-muted mb-3">No products found matching your criteria.</p>
-              {products.length > 0 && (
-                <Button 
-                  variant="outline-primary" 
-                  onClick={() => {
-                    setSelectedCategory('All');
-                    setSearchTerm('');
-                  }}
-                >
-                  Clear Filters
-                </Button>
-              )}
+              <Button 
+                variant="outline-primary" 
+                onClick={() => { setSelectedCategory('All'); setSearchTerm(''); }}
+              >
+                Clear Filters
+              </Button>
             </div>
           </Col>
         </Row>
@@ -223,11 +182,8 @@ function Products() {
                 <Card className="h-100 shadow-sm hover-card">
                   <Card.Body>
                     <div className="mb-2">
-                      <Badge bg={getCategoryColor(getProductCategory(product.name))} className="me-2">
-                        {getProductCategory(product.name)}
-                      </Badge>
-                      <Badge bg="secondary">
-                        {getProductTier(product.name)}
+                      <Badge bg={getCategoryColor(product.category)} className="me-2">
+                        {product.category || 'Other'}
                       </Badge>
                     </div>
                     <Card.Title className="mt-2">{product.name}</Card.Title>

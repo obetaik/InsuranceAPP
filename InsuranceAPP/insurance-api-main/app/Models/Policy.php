@@ -38,6 +38,6 @@ class Policy extends Model
     
     public function product()
     {
-        return $this->belongsTo(InsuranceProduct::class, 'insurance_product_id');
+        return $this->belongsTo(InsuranceProducts::class, 'insurance_product_id');
     }
 }

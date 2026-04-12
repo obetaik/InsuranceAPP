@@ -4,7 +4,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\InsuranceProduct;
+use App\Models\InsuranceProducts;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -13,7 +13,7 @@ class ProductController extends Controller
     public function index(Request $request)
     {
         try {
-            $products = InsuranceProduct::all();
+            $products = InsuranceProducts::all();
             
             Log::info('Products fetched', ['count' => $products->count()]);
             

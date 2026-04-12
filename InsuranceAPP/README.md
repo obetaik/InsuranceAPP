@@ -1,255 +1,281 @@
-# 🛡️ Insurance API (Laravel Backend)
+================================================================================
+PERSONAL INSURANCE APPLICATION - INFRASTRUCTURE DEPLOYMENT
+================================================================================
 
-## 📌 Project Overview
+Project: Insurance API Platform (Two-VM Architecture with Database Isolation)
+Author: Infrastructure Team
+Date: April 2026
+Version: 2.0.0
 
-This project is a **Personal Insurance Web Application API** built with Laravel.  
-It provides endpoints for managing users, insurance products, quotes, and policies.
+================================================================================
+ARCHITECTURE SUMMARY
+================================================================================
 
-The API is designed to work with a React frontend and will later be deployed to a cloud platform.
+This deployment provisions:
 
-\---
+- 2 Azure VMs (Ubuntu 22.04):
+  - Frontend VM: React application (served by Nginx) - Public IP accessible
+  - Backend VM: Laravel backend API (PHP 8.3) - No public IP, isolated
+- Azure SQL Database (Basic tier) - ONLY accessible by Backend VM
+- Azure Storage Account (Static assets)
+- Virtual Network with two isolated subnets:
+  - Frontend Subnet (10.0.1.0/24): Public access for HTTP/HTTPS
+  - Backend Subnet (10.0.2.0/24): Private, only accessible from Frontend VM
+- Network Security Groups for traffic control
 
-## 🏗️ Tech Stack
+SECURITY HIGHLIGHTS:
 
-* Backend: Laravel 12 (REST API)
-* Database: SQLite (Development) / Azure SQL (Production)
-* Authentication: Laravel Sanctum (Token-based)
-* Testing Tool: Postman
+- Frontend VM: Public access only (ports 80, 443)
+- Backend VM: NO public IP, NO direct internet access
+- Database: Firewall allows ONLY Backend VM private IP
+- Frontend CANNOT access database directly (even if compromised)
+- SSH to backend requires passing through frontend (jump host pattern)
 
-\---
+================================================================================
+ASSUMPTIONS AND LIMITATIONS
+================================================================================
 
-## ⚙️ Installation \& Setup
+Assumptions:
 
-### 1\. Clone the Repository
+1. Azure subscription with Contributor access
+2. Azure CLI installed and configured
+3. Auth0 account with configured application
+4. Laravel backend code in ../insurance-api-main/
+5. React frontend code in ../frontend/
+6. SSH key or password access configured
 
-```bash
-git clone <your-repo-url>
-cd insurance-api
-```
+Limitations:
 
-### 2\. Install Dependencies
+1. Single instance per VM (no high availability for production)
+2. Basic SQL tier (no failover support)
+3. Manual SSL configuration required for HTTPS
+4. React builds performed on the Frontend VM (requires Node.js)
+5. Backup strategy not implemented
+6. Backend VM requires jump host access via Frontend VM
 
-```bash
-composer install
-```
+================================================================================
+KNOWN ISSUES AND RESOLUTIONS
+================================================================================
+
+Issue 1: Public IP deployment fails
 
-### 3\. Environment Setup
+- Error: "IPv4BasicSkuPublicIpCountLimitReached"
+- Resolution: Use Standard SKU public IP with Static allocation
+- Fixed in: main.bicep (frontendPublicIP resource)
 
-```bash
-cp .env.example .env
-php artisan key:generate
-```
+Issue 2: SQL Server connection timeout from Backend VM
 
-### 4\. Configure Database (SQLite)
+- Error: "Cannot open database requested"
+- Resolution: SQL firewall rule only allows Backend VM IP
+- Command: az sql server firewall-rule create --name AllowBackendVM --start-ip-address $BACKEND_IP
 
-Update `.env`:
+Issue 3: Frontend cannot connect to Backend VM
 
-```env
-DB\_CONNECTION=sqlite
-DB\_DATABASE=database/database.sqlite
-```
+- Error: "Connection refused" or timeout
+- Resolution: Ensure Backend VM NSG allows HTTP from Frontend subnet (10.0.1.0/24)
+- Check: backend-nsg security rules
 
-Then create the file:
+Issue 4: React routes return 404
 
-```bash
-touch database/database.sqlite
-```
+- Error: "Cannot GET /products"
+- Resolution: Configure Nginx with try_files $uri $uri/ /index.html
+- Fixed in: frontend-setup.sh
 
-### 5\. Run Migrations
+Issue 5: API routes return 404
 
-```bash
-php artisan migrate
-```
+- Error: "Cannot GET /api/products"
+- Resolution: Configure Frontend Nginx to proxy /api/\* to Backend VM
+- Fixed in: frontend-setup.sh (proxy_pass to BACKEND_IP)
 
-### 6\. Start Server
+Issue 6: CORS multiple values error
 
-```bash
-php artisan serve
-```
+- Error: "Access-Control-Allow-Origin header contains multiple values"
+- Resolution: Remove CORS headers from Nginx, keep only Laravel config
+- Fixed in: backend-setup.sh (CORS only in Laravel)
 
-API will run on:
+Issue 7: Cannot SSH to Backend VM directly
 
-```
-http://127.0.0.1:8000
-```
+- Error: "Connection timeout" (Backend has no public IP)
+- Resolution: Use jump host pattern - SSH through Frontend VM
+- Command: ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP
 
-\---
+Issue 8: Circular dependency in Bicep deployment
 
-## 🔐 Authentication
+- Error: "Cannot reference backend.outputs before backend module is defined"
+- Resolution: Declare Backend VM module BEFORE Frontend VM module
+- Fixed in: main.bicep (module order)
 
-This API uses **token-based authentication**.
+================================================================================
+DEPLOYMENT INSTRUCTIONS
+================================================================================
 
-* Register/Login returns a token
-* Send token in headers for protected routes
+Prerequisites:
 
-Example:
+1. Install Azure CLI: https://docs.microsoft.com/cli/azure/install-azure-cli
+2. Run 'az login' to authenticate
+3. Ensure Laravel and React code are ready
+4. Ensure all Bicep files are in correct directory structure
 
-```
-Authorization: Bearer YOUR\_TOKEN
-```
+Directory Structure Required:
+infrastructure/
+├── main.bicep
+└── modules/
+├── sql.bicep
+└── storage.bicep
 
-\---
+Deployment Steps:
 
-## 📡 API Endpoints
+1. Create resource group:
+   az group create --name insureapi-rg --location canadacentral
 
-### 🔓 Public Routes
+2. Deploy infrastructure:
+   az deployment group create \
+    --resource-group insureapi-rg \
+    --template-file infrastructure/main.bicep \
+    --parameters adminUsername=azureuser \
+    --parameters adminPassword='PASSWORD' \
+    --parameters sqlAdminPassword='PSSWORD'
 
-|Method|Endpoint|Description|
-|-|-|-|
-|POST|`/api/register`|Register a new user|
-|POST|`/api/login`|Login user|
-|GET|`/api/products`|Get all insurance products|
+3. Get VM IPs and connectivity info:
+   $FRONTEND_IP = az deployment group show -g insureapi-rg -n main --query properties.outputs.frontendPublicIP.value -o tsv
+   $BACKEND_IP = az deployment group show -g insureapi-rg -n main --query properties.outputs.backendPrivateIp.value -o tsv
+   Write-Host "Frontend IP: $FRONTEND_IP (Public - Accessible from internet)"
+   Write-Host "Backend IP: $BACKEND_IP (Private - No direct access)"
 
-\---
+4. Run Frontend VM setup script (Nginx + Node.js):
+   scp infrastructure/scripts/frontend-setup.sh azureuser@$FRONTEND_IP:/home/azureuser/
+   ssh azureuser@$FRONTEND_IP "chmod +x frontend-setup.sh && sudo ./frontend-setup.sh $BACKEND_IP"
 
-### 🔒 Protected Routes
+5. Run Backend VM setup script (PHP + Laravel + SQL Drivers):
+   scp infrastructure/scripts/backend-setup.sh azureuser@$FRONTEND_IP:/home/azureuser/
+   ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "chmod +x backend-setup.sh && sudo ./backend-setup.sh"
 
-|Method|Endpoint|Description|
-|-|-|-|
-|POST|`/api/logout`|Logout user|
-|GET|`/api/quotes`|Get user quotes|
-|POST|`/api/quotes`|Create a quote|
-|GET|`/api/policies`|Get user policies|
-|POST|`/api/policies`|Create a policy|
+6. Deploy Laravel backend (from local machine):
+   scp -r ../insurance-api-main/\* azureuser@$FRONTEND_IP:/var/www/backend/
+   ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP
+   cd /var/www/backend
+   composer install --no-dev --optimize-autoloader
+   cp .env.example .env
+   php artisan key:generate
 
-\---
+   # Update .env with database connection:
 
-## 📊 Core Features
+   # DB_HOST=insureapi-sqlserver.database.windows.net
 
-* User Authentication (Register/Login/Logout)
-* Insurance Products Listing
-* Quote Generation
-* Policy Creation
-* Secure API with Token Authentication
+   # DB_DATABASE=insurance-api
 
-\---
+   # DB_USERNAME=sqladmin@MYAPP-sqlserver
 
-## 🌐 CORS Configuration
+   # DB_PASSWORD=<MYPASSWORD>
 
-CORS is enabled for development to allow frontend integration.
+   php artisan migrate --force
+   sudo chown -R www-data:www-data storage bootstrap/cache
+   sudo systemctl restart php8.3-fpm
+   exit
 
-If issues occur:
+7. Deploy React frontend (from local machine):
+   scp -r ../frontend/\* azureuser@$FRONTEND_IP:/var/www/frontend/
+   ssh azureuser@$FRONTEND_IP
+   cd /var/www/frontend
+   npm install
+   npm run build
+   sudo chown -R www-data:www-data build
+   sudo systemctl restart nginx
+   exit
 
-```bash
-php artisan config:clear
-php artisan cache:clear
-```
+8. Access the application:
+   Frontend (React): http://$FRONTEND_IP/
+   Backend API (Laravel): http://$FRONTEND_IP/api/products
 
-\---
+9. Verify database isolation (Security Test):
 
-## 👨‍💻 Frontend Integration Guide (React Developer)
+   # Test from Frontend (should FAIL):
 
-### 📍 Base URL
+   ssh azureuser@$FRONTEND_IP "nc -zv insureapi-sqlserver.database.windows.net 1433"
 
-```javascript
-const API\_URL = "http://127.0.0.1:8000/api";
-```
+   # Test from Backend (should SUCCEED):
 
-------------------------
-## Frontend Setup
----------------------
+   ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "nc -zv insureapi-sqlserver.database.windows.net 1433"
 
-cd frontend
+================================================================================
+CONNECTIVITY MATRIX
+================================================================================
 
-npm install
+| From / To       | Frontend VM   | Backend VM | SQL Database | Internet |
+| --------------- | ------------- | ---------- | ------------ | -------- |
+| Internet (User) | ✅ HTTP/HTTPS | ❌         | ❌           | N/A      |
+| Frontend VM     | N/A           | ✅ HTTP    | ❌ (Blocked) | ✅       |
+| Backend VM      | ❌            | N/A        | ✅ (Allowed) | ❌       |
+| SSH to Frontend | ✅ Direct     | N/A        | N/A          | N/A      |
+| SSH to Backend  | ✅ Via Jump   | ✅ Direct  | N/A          | ❌       |
 
-copy .env.example .env
+================================================================================
+SCALING INSTRUCTIONS
+================================================================================
 
-\# Edit .env with your values
+To scale up Frontend VM:
+az vm resize -g insureapi-rg -n insureapi-frontend-vm --size Standard_D2s_v3
 
-npm run dev
+To scale up Backend VM:
+az vm resize -g insureapi-rg -n insureapi-backend-vm --size Standard_D2s_v3
 
-\---
+To scale database:
+az sql db update -g insureapi-rg -s insureapi-sqlserver -n insurance-api --edition Standard --capacity S1
 
+To add auto-scaling for production:
 
+# Create VM Scale Set for Backend
 
+az vmss create -g insureapi-rg -n backend-vmss --image Ubuntu2204 --vm-sku Standard_B2s --instance-count 2
 
+# Create Load Balancer
 
-### 🔑 Authentication Flow
+az network lb create -g insureapi-rg -n backend-lb --sku Standard --vnet-name insureapi-vnet --subnet backend-subnet
 
-1. User registers or logs in
-2. API returns a token
-3. Store token in localStorage
+# Configure auto-scale rules
 
-```javascript
-localStorage.setItem("token", data.token);
-```
+az monitor autoscale create -g insureapi-rg -n backend-autoscale --resource backend-vmss --min-count 2 --max-count 10 --count 2
+az monitor autoscale rule create --autoscale-name backend-autoscale -g insureapi-rg --condition "Percentage CPU > 70 avg 5m" --scale out 1
+az monitor autoscale rule create --autoscale-name backend-autoscale -g insureapi-rg --condition "Percentage CPU < 30 avg 5m" --scale in 1
 
-\---
+================================================================================
+TROUBLESHOOTING COMMANDS
+================================================================================
 
-### 📡 Making Authenticated Requests
+Check VM status:
+az vm get-instance-view -g insureapi-rg -n insureapi-frontend-vm --query "statuses[1].code"
+az vm get-instance-view -g insureapi-rg -n insureapi-backend-vm --query "statuses[1].code"
 
-```javascript
-const token = localStorage.getItem("token");
+View logs on Frontend VM:
+ssh azureuser@$FRONTEND_IP "sudo tail -f /var/log/nginx/error.log"
 
-fetch(`${API\_URL}/quotes`, {
-    headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-    },
-})
-    .then((res) => res.json())
-    .then((data) => console.log(data));
-```
+View logs on Backend VM:
+ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sudo tail -f /var/log/nginx/error.log"
+ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sudo tail -f /var/www/backend/storage/logs/laravel.log"
 
-\---
+Test connectivity:
 
-### 🧩 Suggested Pages (Frontend)
+# Test Frontend Nginx
 
-#### Public Pages
+curl -I http://$FRONTEND_IP/
 
-* Home Page
-* Products Page
-* Login Page
-* Register Page
+# Test API through Frontend proxy
 
-#### Authenticated Pages
+curl http://$FRONTEND_IP/api/products
 
-* Dashboard
-* Request Quote Page
-* My Quotes Page
-* My Policies Page
-* Policy Details Page
+# Test direct Backend API (should fail - no public IP)
 
-\---
+curl http://$BACKEND_IP/api/products
 
-### 📌 Important Notes for Frontend
+# Test database connectivity from Backend
 
-* Always include the token for protected routes
-* Handle 401 Unauthorized errors (redirect to login)
-* Use JSON for all requests
-* Ensure correct API base URL
+ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sqlcmd -S insureapi-sqlserver.database.windows.net -U sqladmin -P 'password' -d insurance-api -Q 'SELECT 1'"
 
-\---
+Restart services on Frontend VM:
+ssh azureuser@$FRONTEND_IP "sudo systemctl restart nginx"
 
-## 🚀 Deployment Plan
-
-### Current
-
-* Local development with SQLite
-
-### Future
-
-* Backend: Azure App Service
-* Database: Azure SQL
-
-
-
-\---
-
-## 👥 Team Responsibilities
-
-* Backend Developer: API development, database, authentication
-* Frontend Developer: UI/UX, API integration (React)
-* Cloud Engineer: Deployment and cloud integration
-
-\---
-
-## 📞 Contact
-
-For integration or support, contact the backend developer.
-
-```
+Restart services on Backend VM:
+ssh -J azureuser@$FRONTEND_IP azureuser@$BACKEND_IP "sudo systemctl restart php8.3-fpm && sudo systemctl restart nginx"
 
 ---
 
@@ -264,7 +290,7 @@ composer require firebase/php-jwt
 Run migration:
 php artisan migrate
 
-php artisan db:seed --class=ProductSeeder
+php artisan db:seed --class=InsuranceProductSeeder
 
 Verification
 After installation, verify everything is working:
@@ -278,9 +304,9 @@ Check routes
 php artisan route:list
 
 
- 
 
- 
+
+
 
 
 Laravel backend running on http://localhost:8000
@@ -369,19 +395,20 @@ CREATE TABLE `claims` (
   KEY `claims_policy_id_foreign` (`policy_id`),
   CONSTRAINT `claims_policy_id_foreign` FOREIGN KEY (`policy_id`) REFERENCES `policies` (`id`) ON DELETE CASCADE,
   CONSTRAINT `claims_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) 
+)
 
 
 
 CREATE TABLE `insurance_products` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   `name` varchar(255) NOT NULL,
+  `category` text NOT NULL,
   `description` text NOT NULL,
   `base_price` decimal(10,2) NOT NULL,
   `created_at` timestamp NULL DEFAULT NULL,
   `updated_at` timestamp NULL DEFAULT NULL,
   PRIMARY KEY (`id`)
-) 
+)
 
 
 
@@ -430,7 +457,8 @@ CREATE TABLE `quotes` (
   KEY `quotes_insurance_product_id_foreign` (`insurance_product_id`),
   CONSTRAINT `quotes_insurance_product_id_foreign` FOREIGN KEY (`insurance_product_id`) REFERENCES `insurance_products` (`id`) ON DELETE CASCADE,
   CONSTRAINT `quotes_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) 
+)
 
- 
 
+
+```
